@@ -1,0 +1,3 @@
+# The resolved manifest carries the local Pkg.develop path to QuicoptModeler,
+# which is machine-specific — re-resolve on each machine (Pkg.develop + instantiate).
+/Manifest.toml
