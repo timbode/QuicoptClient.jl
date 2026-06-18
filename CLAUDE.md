@@ -22,32 +22,41 @@ on its own.
 
 ## Current state — the conversion layer (MOI → `Program`), wire elided
 
-Built first and proven with the wire skipped: build a JuMP model, import it to a
-`Program`, round-trip through QuicoptModeler's codec (no HTTP), flatten, solve —
-and check it matches solving the original JuMP model directly.
+Built first and proven with the wire skipped, **and without a solver** (the client
+depends on no backend): build a JuMP model, import it to a `Program`, round-trip
+through QuicoptModeler's codec (no HTTP), flatten, and check the IR *evaluates
+identically* to the JuMP source at random points.
 
 ```
 build JuMP model
    │  ① import         (this package: MOI → Program)
    ▼
- Program ─② Wire.encode─► bytes ··(wire skipped)·· ─③ Wire.decode─► Program ─④ flatten─► solve
-        compare  ⇆  JuMP → Ipopt/HiGHS directly on the same model     ← ⑤ differential acceptance
+ Program ─② Wire.encode─► bytes ··(wire skipped)·· ─③ Wire.decode─► Program ─④ flatten─► closures
+        compare evaluation (objective + each constraint residual) ⇆ the JuMP model  ← ⑤ no solver
 ```
 
 Only ① is new here; ②–④ are QuicoptModeler's (already green). So any discrepancy
 in ⑤ localizes to the importer — the house "one thing under test" property.
 
-**Status (first slice, green — 5 tests).** `import_model` covers affine /
-quadratic (MOI's ½-on-diagonal convention) / nonlinear (`^ / exp …`, n-ary `+`,
-unary `-`) functions, variable bounds + integrality (`ZeroOne`/`Integer` →
-`Domain`), and `EqualTo`/`LessThan`/`GreaterThan`/`Interval` → `Zero`/`Nonneg`.
-Three convex fixtures (nonlinear `^`/`/`; quadratic + `exp ≤`; off-diagonal
-quadratic) round-trip and solve to the JuMP+Ipopt optimum. Deferred: unbounded
-variables (the reference `_solve` rejects ±Inf bounds), integer/binary *solving*
-(needs a discrete reference, not Ipopt — domains are imported, not yet exercised),
-`Max` sense, and operators outside the catalog (error by design → register them in
-QuicoptModeler). A `:+` over heterogeneous JuMP scalars surfaced one fix in
-QuicoptModeler's reference lowering (`sum` → `reduce(+, …)`).
+**Status (green — 376 tests).** `import_model` covers affine / quadratic (MOI's
+½-on-diagonal convention) / nonlinear (`^ / exp sin cos …`, n-ary `+`, unary `-`)
+functions, variable bounds + integrality (`ZeroOne`/`Integer` → `Domain`), and
+`EqualTo`/`LessThan`/`GreaterThan`/`Interval` → `Zero`/`Nonneg`. Fidelity is checked
+**backend-free**: the round-tripped IR's `closures` (a *lowering*, not a solver)
+must reproduce the JuMP model's objective + every constraint residual at random
+points. Fixtures: three convex toys plus the **`PowerVertical` mirror**
+(`test/power/`) — AC-OPF *and* unit commitment authored in JuMP, the parallel of
+QuicoptModeler's IR-authored fixture, so the binary `u`'s and the nonlinear
+`v·v·cos` balance are proven to import faithfully. Deferred: unbounded variables
+(importer rejects ±Inf bounds), `Max` sense, and operators outside the catalog
+(error by design → register them in QuicoptModeler).
+
+**Backend-free — a caveat (follow-up).** The client's *direct* deps are `JuMP` +
+`QuicoptModeler` only; no solver, runtime or test. But QuicoptModeler bundles its
+backends (`Ipopt`, `QuicoptMixed`) as hard deps, so installing QuicoptClient still
+pulls them *transitively*. Fully honouring "the client depends on a backend
+nowhere" needs QuicoptModeler's backends made optional (package extensions /
+weakdeps), so its IR + wire + lowerings core installs without any solver. Not done.
 
 ## The conversion (MOI → `Program`)
 
@@ -68,8 +77,9 @@ sqrt …`).
 
 - **Code reads like mathematics**; comment *why*, not *what*. Internal
   functions/types are `_`-prefixed.
-- **Verification-first**: the differential test against JuMP+Ipopt is the spine;
-  the importer is never the thing trusted during bring-up.
+- **Verification-first, backend-free**: the spine is a differential test that the
+  imported + round-tripped IR *evaluates identically* to the JuMP source (via
+  `closures`) — never a solver. The client depends on a backend nowhere.
 - The IR and proto are **owned by QuicoptModeler** — depend on its types, never
   fork them here.
 - Never `git push`; no `Co-Authored-By` trailer in commits; work on a branch.
