@@ -51,12 +51,15 @@ QuicoptModeler's IR-authored fixture, so the binary `u`'s and the nonlinear
 (importer rejects ±Inf bounds), `Max` sense, and operators outside the catalog
 (error by design → register them in QuicoptModeler).
 
-**Backend-free — a caveat (follow-up).** The client's *direct* deps are `JuMP` +
-`QuicoptModeler` only; no solver, runtime or test. But QuicoptModeler bundles its
-backends (`Ipopt`, `QuicoptMixed`) as hard deps, so installing QuicoptClient still
-pulls them *transitively*. Fully honouring "the client depends on a backend
-nowhere" needs QuicoptModeler's backends made optional (package extensions /
-weakdeps), so its IR + wire + lowerings core installs without any solver. Not done.
+**Backend-free — a caveat (mostly resolved).** The client's *direct* deps are
+`JuMP` + `QuicoptModeler` only; no solver, runtime or test. As of 2026-06-18
+QuicoptModeler's backends are *mostly* optional — `Ipopt`, `HiGHS`, and
+`QuicoptBinary` are weakdeps / package extensions, so installing QuicoptClient no
+longer pulls them. **`QuicoptMixed` is the one remaining hard dep** (still in
+QuicoptModeler `[deps]`), so it is still pulled transitively (+ OrdinaryDiffEqTsit5
+etc.). Fully honouring "the client depends on a backend nowhere" now needs only
+QuicoptMixed made a weakdep too — then the IR + wire + lowerings + route core
+installs with zero solvers.
 
 ## The conversion (MOI → `Program`)
 
