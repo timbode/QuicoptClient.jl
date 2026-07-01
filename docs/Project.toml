@@ -1,0 +1,6 @@
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+QuicoptClient = "e3379caf-a7d1-49bc-bad0-a3c1736f44f4"
+
+[compat]
+Documenter = "1"

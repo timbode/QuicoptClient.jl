@@ -1,0 +1,240 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: (c) 2026 Tim Bode, PGI-12, Forschungszentrum Jülich
+// ===========================================================================
+//  Quicopt wire schema — v1
+//
+//  The language-neutral API contract of the Quicopt service. A client authors a
+//  model in a front-end (JuMP, Pyomo, …), lowers it to the structured `Program`
+//  below, and serializes it to protobuf bytes; the service decodes and solves it.
+//  This file is the source of truth clients compile against.
+//  ---------------------------------------------------------------------------
+//  Schema evolution (v1):
+//    - Field numbers are permanent. Never reuse a number; `reserved` removed
+//      ones. Additive-only: new optional fields/messages may be appended.
+//    - `oneof` cases are append-only.
+//    - Breaking changes bump the package to `quicopt.modeler.v2` in a new file;
+//      v1 stays frozen.
+//
+//  Conventions:
+//    - IR names (`x`, `i`, `S`, `+`, `min`) are `string` here; a client maps them
+//      to its own symbol type at the boundary. Data is never carried as a bare
+//      string, so the mapping is lossless.
+//    - Tuple-keyed tables (params, indexed_sets, fix) cannot be protobuf `map`
+//      (keys aren't scalar) — each is a `repeated Entry { key, value }`.
+// ===========================================================================
+
+syntax = "proto3";
+
+package quicopt.modeler.v1;
+
+// ---------------------------------------------------------------------------
+// Index machinery
+// ---------------------------------------------------------------------------
+
+// One entry of an index tuple: a concrete coordinate (`3`) or a bound index
+// name (`i`).
+message IndexElem {
+  oneof kind {
+    int64  int  = 1;  // a concrete coordinate
+    string name = 2;  // a bound index name, e.g. i
+  }
+}
+
+// An index tuple: () scalar, (i,), (3,), (i, j) …
+message Index {
+  repeated IndexElem elems = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Expression tree  (e ::= c │ p[idx] │ x[idx] │ op(e…) │ ⊕_{k∈S} e(k))
+//
+// Serialized as a tree — each node stands alone, so the structure is acyclic by
+// construction.
+// ---------------------------------------------------------------------------
+
+message Expression {
+  oneof node {
+    double   constant = 1;  // Const(value) — always emitted (a set oneof case),
+                            //                so Const(0.0) survives the round-trip
+    ParamRef param    = 2;  // Param(name, index)
+    VarRef   var      = 3;  // Var(name, index)
+    Apply    apply    = 4;  // Apply(op, args)
+    Reduce   reduce   = 5;  // Reduce(op, idx, over, body, cond)
+  }
+}
+
+message ParamRef {
+  string name  = 1;
+  Index  index = 2;
+}
+
+message VarRef {
+  string name  = 1;
+  Index  index = 2;
+}
+
+// Operator application. `op` is a key into the operator catalog (see Catalog),
+// not code; an unknown op or an arity mismatch is rejected.
+message Apply {
+  string     op   = 1;
+  repeated Expression args = 2;
+}
+
+// A reference to an index set, possibly applied to enclosing bound indices.
+// args = () → a flat set (resolved against IndexSet); args = (i,) → a dependent
+// set "S(i)" (resolved against IndexedSet once i is bound).
+message SetRef {
+  string name = 1;
+  Index  args = 2;
+}
+
+// Aggregation  ⊕_{idx ∈ over} body, optionally filtered by `cond` (keep a term
+// only where cond ≠ 0). `cond` absent (message not set) ⇒ no filter.
+message Reduce {
+  string     op   = 1;  // the fold operator key (+, *, …)
+  string     idx  = 2;  // the bound dummy index name
+  SetRef     over = 3;
+  Expression body = 4;
+  Expression cond = 5;  // optional
+}
+
+// ---------------------------------------------------------------------------
+// Constraints — function-in-set, both sides open
+// ---------------------------------------------------------------------------
+
+message Zero   {}                 // f = 0
+message Nonneg {}                 // f ≥ 0
+
+// Indicator: the binary `bin` being active implies f lies in `inner`. Kept
+// first-class on the wire (not desugared); the service decides how it is realized.
+message Indicator {
+  VarRef bin   = 1;
+  ConSet inner = 2;
+}
+
+message ConSet {
+  oneof kind {
+    Zero      zero      = 1;
+    Nonneg    nonneg    = 2;
+    Indicator indicator = 3;
+  }
+}
+
+// One (index symbol => set) binding of a constraint's quantifier.
+message QuantBinding {
+  string idx = 1;
+  SetRef set = 2;
+}
+
+// f ∈ set, quantified over `over` (∅ over ⇒ a single flat constraint).
+message Constraint {
+  Expression   f    = 1;
+  ConSet       set  = 2;
+  repeated QuantBinding over = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Variables, sets, data
+// ---------------------------------------------------------------------------
+
+enum Domain {
+  DOMAIN_UNSPECIFIED = 0;  // invalid on the wire; rejected on decode
+  CONTINUOUS         = 1;
+  INTEGER            = 2;
+  BINARY             = 3;
+}
+
+// A per-variable bound: a scalar, or the name of a per-index Param table to look
+// the bound up in (so a bound may vary by index).
+message Bound {
+  oneof kind {
+    double scalar = 1;
+    string param  = 2;  // name of a Param table
+  }
+}
+
+// A variable *family* indexed over `axes` (set names; empty ⇒ scalar).
+message VarDecl {
+  string          name   = 1;
+  repeated string axes   = 2;
+  Domain          domain = 3;
+  Bound           lower  = 4;
+  Bound           upper  = 5;
+  double          start  = 6;
+}
+
+// A flat index set: name + concrete elements.
+message IndexSet {
+  string             name     = 1;
+  repeated IndexElem elements = 2;
+}
+
+// A dependent set carried as data: one fibre per key tuple, e.g. S[(i,)] → [j…].
+message IndexedSetFibre {
+  Index              key   = 1;
+  repeated IndexElem value = 2;
+}
+message IndexedSet {
+  string                   name   = 1;
+  repeated IndexedSetFibre fibres = 2;
+}
+
+// A named indexed data table: one entry per key tuple, e.g. p[(i,)], A[(i,j)].
+message ParamEntry {
+  Index  key   = 1;
+  double value = 2;
+}
+message ParamTable {
+  string              name    = 1;
+  repeated ParamEntry entries = 2;
+}
+
+// A per-index pin: fix variable `var` at `index` to `value` (e.g. x[1] = 0).
+message FixEntry {
+  string var   = 1;
+  Index  index = 2;
+  double value = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Program — the structured authoring container (what crosses the wire)
+// ---------------------------------------------------------------------------
+
+message Program {
+  repeated IndexSet   sets         = 1;
+  repeated IndexedSet indexed_sets = 2;
+  repeated ParamTable params       = 3;
+  repeated VarDecl    vars         = 4;
+  Expression          objective    = 5;
+  string              sense        = 6;  // "min" | "max"
+  repeated Constraint constraints  = 7;
+  repeated FixEntry   fix          = 8;
+}
+
+// ---------------------------------------------------------------------------
+// Rebinding — graph once, data per instance
+//
+// A client sends the Program (the graph) once, then a ParamData per instance to
+// re-solve the same structure on new data without re-sending the expression trees.
+// ---------------------------------------------------------------------------
+
+message ParamData {
+  repeated ParamTable params = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Operator catalog — the versioned set of operators a client may emit
+//
+// Clients fetch the Catalog to discover the supported ops; `version` co-versions
+// with the schema. arity = -1 ≡ variadic.
+// ---------------------------------------------------------------------------
+
+message OpDef {
+  string          op    = 1;
+  int32           arity = 2;
+  repeated string tags  = 3;
+}
+message Catalog {
+  uint32           version = 1;
+  repeated OpDef   ops     = 2;
+}

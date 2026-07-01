@@ -1,0 +1,10 @@
+# The resolved manifest is machine-specific — re-resolve on each machine.
+/Manifest.toml
+
+# Local maintainer context (closed-architecture notes), not part of the public package.
+/CLAUDE.md
+/PLAN.md
+
+# Documenter build output + machine-specific docs manifest (CI resolves its own).
+/docs/build/
+/docs/Manifest.toml
