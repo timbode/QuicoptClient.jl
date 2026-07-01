@@ -12,7 +12,7 @@ QuicoptClient
 
 ```julia
 using Pkg
-Pkg.add(url = "https://github.com/timbode/QuicoptClient.jl")
+Pkg.add("QuicoptClient")
 ```
 
 All dependencies are public — `JuMP`, `ProtoBuf`, `HTTP`, `JSON3`. No solver and no
