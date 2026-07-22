@@ -59,6 +59,16 @@ _json(nt) = Vector{UInt8}(JSON3.write(nt))
     r4 = solve(m; key_path = keyfile, silent = true, transport = t4)
     @test r4.status == "optimal" && !isempty(t4.requests[1].body)
 
+    # 4b) an explicit `key` (e.g. a distributed internal key) authenticates as-is,
+    #     overrides any cached key, and is never written to disk.
+    keyfile3 = joinpath(mktempdir(), "free_key")
+    write(keyfile3, "ff"^32)                                      # a cached key that must be ignored
+    t4b = FakeTransport([(; status = 200, api_key = "ee"^32, body = _okbody(objective = 7.0))])
+    r4b = solve(b"WIRE"; key = "ab"^32, key_path = keyfile3, silent = true, transport = t4b)
+    @test r4b.objective == 7.0
+    @test t4b.requests[1].headers["Authorization"] == "Bearer " * "ab"^32   # explicit key, not the cache
+    @test read(keyfile3, String) == "ff"^32                       # cache untouched: explicit key never persisted
+
     # ── async ───────────────────────────────────────────────────────────────
     # 5) submit → poll (running → done) → result; minted key replayed on the polls
     keyfile2 = joinpath(mktempdir(), "free_key")

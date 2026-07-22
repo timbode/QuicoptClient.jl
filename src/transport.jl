@@ -94,39 +94,45 @@ See the byte method below for the keyword arguments.
 solve(model::JuMP.Model; kwargs...) = solve(encode(import_model(model)); kwargs...)
 
 """
-    solve(bytes; base_url, key_path, async, poll, timeout, silent, transport) -> JSON3.Object
+    solve(bytes; base_url, key, key_path, async, poll, timeout, silent, transport) -> JSON3.Object
 
 POST already-encoded wire `bytes` and return the parsed JSON result (`status`,
 `objective`, `feasible`, `solution`, `display`, …). `async=true` submits to
 `/v1/jobs` and polls to completion (use it for the first call against a cold
 server — the worker warmup can 504 a sync call); otherwise it is one `/v1/solve`.
-On the first keyless call the server mints an API key, cached at `key_path` and
-replayed as a Bearer token. A non-2xx response throws [`QuicoptError`](@ref).
-`silent=true` suppresses printing the result banner.
+Pass `key` to authenticate with a specific key you already hold (e.g. a
+distributed internal/test key) — it is used as-is and never written to disk.
+Otherwise, on the first keyless call the server mints a free key, cached at
+`key_path` and replayed as a Bearer token thereafter. A non-2xx response throws
+[`QuicoptError`](@ref). `silent=true` suppresses printing the result banner.
 """
 function solve(bytes::AbstractVector{UInt8};
                base_url::AbstractString = DEFAULT_BASE_URL,
+               key::AbstractString = "",
                key_path::AbstractString = _default_key_path(),
                async::Bool = false, poll::Real = 0.5, timeout::Real = 180.0,
                silent::Bool = false, transport = _http)
-    key = isfile(key_path) ? strip(read(key_path, String)) : ""
+    # An explicit `key` is used as-is and never persisted; otherwise fall back to
+    # the cached free key (minting one on the first keyless call).
+    explicit = !isempty(key)
+    tok = explicit ? String(key) : (isfile(key_path) ? String(strip(read(key_path, String))) : "")
     headers = ["Content-Type" => "application/octet-stream"]
-    isempty(key) || push!(headers, "Authorization" => "Bearer " * key)
+    isempty(tok) || push!(headers, "Authorization" => "Bearer " * tok)
 
     resp = transport(:POST, string(base_url, async ? "/v1/jobs" : "/v1/solve"), headers, bytes)
     resp.status >= 400 && throw(_error(resp))
 
-    if isempty(key) && !isempty(resp.api_key)            # cache the minted key, then use it below
+    if !explicit && isempty(tok) && !isempty(resp.api_key)  # cache the minted key, then use it below
         mkpath(dirname(key_path))
         write(key_path, resp.api_key)
-        key = String(resp.api_key)
+        tok = String(resp.api_key)
         silent || @info "minted a free Quicopt key (cached at $key_path)"
     end
 
     async || return _finish(JSON3.read(resp.body), silent)
 
     # async: poll the job to completion, then fetch its result
-    auth = isempty(key) ? Pair{String,String}[] : ["Authorization" => "Bearer " * key]
+    auth = isempty(tok) ? Pair{String,String}[] : ["Authorization" => "Bearer " * tok]
     job_id = String(JSON3.read(resp.body).job_id)
     deadline = time() + timeout
     while true
