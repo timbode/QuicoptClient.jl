@@ -89,12 +89,29 @@ _finish(result, silent) = (silent || (haskey(result, :display) && println(result
     solve(model::JuMP.Model; kwargs...) -> JSON3.Object
 
 Import `model`, encode it to wire bytes, and solve it via the Quicopt service.
-See the byte method below for the keyword arguments.
+Tags the call with `source_language = "jump"` (the modelling front-end) unless
+overridden. See the byte method below for the keyword arguments (incl. `project`).
 """
-solve(model::JuMP.Model; kwargs...) = solve(encode(import_model(model)); kwargs...)
+solve(model::JuMP.Model; source_language::AbstractString = "jump", kwargs...) =
+    solve(encode(import_model(model)); source_language = source_language, kwargs...)
 
 """
-    solve(bytes; base_url, key, key_path, async, poll, timeout, silent, transport) -> JSON3.Object
+    _meta_query(source_language, project) -> String
+
+Build the `?source_language=…&project_id=…` query suffix carrying the optional
+per-call metadata tags (each omitted when empty, values URL-escaped). These ride
+the query string, not the wire bytes — the model is the mathematics; these are
+request/billing attributes. Returns `""` when both are empty.
+"""
+function _meta_query(source_language::AbstractString, project::AbstractString)
+    parts = String[]
+    isempty(source_language) || push!(parts, "source_language=" * HTTP.URIs.escapeuri(source_language))
+    isempty(project)         || push!(parts, "project_id=" * HTTP.URIs.escapeuri(project))
+    isempty(parts) ? "" : "?" * join(parts, "&")
+end
+
+"""
+    solve(bytes; base_url, key, source_language, project, key_path, async, poll, timeout, silent, transport) -> JSON3.Object
 
 POST already-encoded wire `bytes` and return the parsed JSON result (`status`,
 `objective`, `feasible`, `solution`, `display`, …). `async=true` submits to
@@ -103,12 +120,17 @@ server — the worker warmup can 504 a sync call); otherwise it is one `/v1/solv
 Pass `key` to authenticate with a specific key you already hold (e.g. a
 distributed internal/test key) — it is used as-is and never written to disk.
 Otherwise, on the first keyless call the server mints a free key, cached at
-`key_path` and replayed as a Bearer token thereafter. A non-2xx response throws
-[`QuicoptError`](@ref). `silent=true` suppresses printing the result banner.
+`key_path` and replayed as a Bearer token thereafter. `source_language` and
+`project` tag the call (which front-end authored it; a project label for
+per-project invoicing) — sent as query params, not baked into the model. A
+non-2xx response throws [`QuicoptError`](@ref). `silent=true` suppresses printing
+the result banner.
 """
 function solve(bytes::AbstractVector{UInt8};
                base_url::AbstractString = DEFAULT_BASE_URL,
                key::AbstractString = "",
+               source_language::AbstractString = "",
+               project::AbstractString = "",
                key_path::AbstractString = _default_key_path(),
                async::Bool = false, poll::Real = 0.5, timeout::Real = 180.0,
                silent::Bool = false, transport = _http)
@@ -119,7 +141,8 @@ function solve(bytes::AbstractVector{UInt8};
     headers = ["Content-Type" => "application/octet-stream"]
     isempty(tok) || push!(headers, "Authorization" => "Bearer " * tok)
 
-    resp = transport(:POST, string(base_url, async ? "/v1/jobs" : "/v1/solve"), headers, bytes)
+    submit_url = string(base_url, async ? "/v1/jobs" : "/v1/solve", _meta_query(source_language, project))
+    resp = transport(:POST, submit_url, headers, bytes)
     resp.status >= 400 && throw(_error(resp))
 
     if !explicit && isempty(tok) && !isempty(resp.api_key)  # cache the minted key, then use it below

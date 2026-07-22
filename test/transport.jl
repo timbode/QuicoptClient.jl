@@ -69,6 +69,20 @@ _json(nt) = Vector{UInt8}(JSON3.write(nt))
     @test t4b.requests[1].headers["Authorization"] == "Bearer " * "ab"^32   # explicit key, not the cache
     @test read(keyfile3, String) == "ff"^32                       # cache untouched: explicit key never persisted
 
+    # 4c) source_language + project ride the POST query string (metadata, not bytes)
+    t4c = FakeTransport([(; status = 200, api_key = "", body = _okbody())])
+    solve(b"WIRE"; source_language = "pyomo", project = "site A/1", key = "ab"^32,
+          silent = true, transport = t4c)
+    @test occursin("source_language=pyomo", t4c.requests[1].url)
+    @test occursin("project_id=site%20A%2F1", t4c.requests[1].url)     # URL-escaped
+    @test t4c.requests[1].body == b"WIRE"                              # metadata rides the URL, not the body
+
+    # 4d) solve(::JuMP.Model) tags source_language = jump automatically
+    m2 = Model(); @variable(m2, 0 <= y <= 1); @objective(m2, Min, y)
+    t4d = FakeTransport([(; status = 200, api_key = "", body = _okbody())])
+    solve(m2; key = "ab"^32, silent = true, transport = t4d)
+    @test occursin("source_language=jump", t4d.requests[1].url)
+
     # ── async ───────────────────────────────────────────────────────────────
     # 5) submit → poll (running → done) → result; minted key replayed on the polls
     keyfile2 = joinpath(mktempdir(), "free_key")
