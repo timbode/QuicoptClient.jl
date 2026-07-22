@@ -45,7 +45,10 @@ result = solve(m)                      # POSTs to the service; prints the result
 ```
 
 The first call mints a free key (cached at `~/.cache/quicopt/free_key`) and replays
-it on later calls. Target a specific server with `solve(m; base_url = "…")`.
+it on later calls. Target a specific server with `solve(m; base_url = "…")`, or use
+a key you already hold with `solve(m; key = "…")`. Tag a call with
+`solve(m; project = "my-project")` to attribute it to a project (per-project
+invoicing when one key serves several); the JuMP front-end is recorded automatically.
 
 ## Tests
 
