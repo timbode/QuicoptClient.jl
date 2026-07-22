@@ -51,9 +51,13 @@ result = solve(m)                      # POSTs to the service; prints the result
 @show result.status result.objective result.solution
 ```
 
-The first call mints a free key (cached at `~/.cache/quicopt/free_key`) and replays
-it on later calls. Target a specific server with `solve(m; base_url = "…")`, or use
-a key you already hold with `solve(m; key = "…")`. Tag a call with
+The first call mints a free key, cached at `$XDG_CACHE_HOME/quicopt/free_key`
+(`~/.cache/…` by default) and replayed on every later call — including from later
+runs, so you keep one key without doing anything. Where the home directory does not
+survive the run (CI, containers), set `QUICOPT_KEY_PATH` (or `solve(m; key_path =
+"…")`) to durable storage, or every run mints a new key. Target a specific server
+with `solve(m; base_url = "…")`, or use a key you already hold with
+`solve(m; key = "…")` (used as-is, never cached). Tag a call with
 `solve(m; project = "my-project")` to attribute it to a project (per-project
 invoicing when one key serves several); the JuMP front-end is recorded automatically.
 

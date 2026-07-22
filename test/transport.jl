@@ -98,4 +98,59 @@ _json(nt) = Vector{UInt8}(JSON3.write(nt))
     @test endswith(t5.requests[end].url, "/result")
     @test read(keyfile2, String) == "cd"^32
     @test t5.requests[2].headers["Authorization"] == "Bearer " * "cd"^32   # poll uses the minted key
+
+    # ── the cached key's lifecycle ──────────────────────────────────────────
+    # 6) a cache can outlive the key it holds; a 401 discards it and mints once
+    keyfile4 = joinpath(mktempdir(), "free_key")
+    write(keyfile4, "aa"^32)                                      # stale: the server no longer knows it
+    t6 = FakeTransport([
+        (; status = 401, api_key = "", body = _json((; error = "unknown key", reason = "invalid_key"))),
+        (; status = 200, api_key = "bb"^32, body = _okbody(objective = 3.0))])
+    r6 = solve(b"WIRE"; key_path = keyfile4, silent = true, transport = t6)
+    @test r6.objective == 3.0
+    @test t6.requests[1].headers["Authorization"] == "Bearer " * "aa"^32   # the stale key was tried
+    @test !haskey(t6.requests[2].headers, "Authorization")                # the retry is keyless
+    @test read(keyfile4, String) == "bb"^32                        # replaced, not merely dropped
+
+    # 7) a key minted *this run* that is then rejected must surface the 401 rather
+    #    than mint again — that path is what turns one caller into many keys.
+    keyfile5 = joinpath(mktempdir(), "free_key")
+    t7 = FakeTransport([(; status = 401, api_key = "", body = _json((; reason = "invalid_key")))])
+    e7 = try
+        solve(b"WIRE"; key_path = keyfile5, silent = true, transport = t7)
+    catch err
+        err
+    end
+    @test e7 isa QuicoptError && e7.status == 401
+    @test length(t7.requests) == 1                                 # no retry, no second mint
+
+    # 8) a rejected explicit key propagates too, and never touches the cache
+    keyfile6 = joinpath(mktempdir(), "free_key")
+    write(keyfile6, "cc"^32)
+    t8 = FakeTransport([(; status = 401, api_key = "", body = _json((; reason = "invalid_key")))])
+    e8 = try
+        solve(b"WIRE"; key = "dd"^32, key_path = keyfile6, silent = true, transport = t8)
+    catch err
+        err
+    end
+    @test e8 isa QuicoptError && e8.status == 401
+    @test length(t8.requests) == 1
+    @test read(keyfile6, String) == "cc"^32                        # cache untouched
+
+    # 9) the cache holds a credential, so it must not be group/world readable
+    keyfile7 = joinpath(mktempdir(), "free_key")
+    t9 = FakeTransport([(; status = 200, api_key = "ef"^32, body = _okbody())])
+    solve(b"WIRE"; key_path = keyfile7, silent = true, transport = t9)
+    @test filemode(keyfile7) & 0o777 == 0o600
+
+    # 10) the default path honours XDG, and KEY_PATH_ENV overrides it outright
+    withenv(QuicoptClient.KEY_PATH_ENV => nothing, "XDG_CACHE_HOME" => "/xdg") do
+        @test QuicoptClient._default_key_path() == "/xdg/quicopt/free_key"
+    end
+    withenv(QuicoptClient.KEY_PATH_ENV => nothing, "XDG_CACHE_HOME" => nothing) do
+        @test QuicoptClient._default_key_path() == joinpath(homedir(), ".cache", "quicopt", "free_key")
+    end
+    withenv(QuicoptClient.KEY_PATH_ENV => "/elsewhere/key", "XDG_CACHE_HOME" => "/xdg") do
+        @test QuicoptClient._default_key_path() == "/elsewhere/key"
+    end
 end

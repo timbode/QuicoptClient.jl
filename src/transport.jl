@@ -26,14 +26,63 @@ The public Quicopt service endpoint `solve` targets unless a `base_url` is given
 const DEFAULT_BASE_URL = "https://try.quicoptapi.pgi.fz-juelich.de"
 
 """
+    KEY_PATH_ENV
+
+Environment variable overriding where the free key is cached. Point it at durable
+storage in an environment whose home directory does not survive the run (CI,
+containers), where the default location is wiped between sessions and every run
+would otherwise mint a fresh key.
+"""
+const KEY_PATH_ENV = "QUICOPT_KEY_PATH"
+
+"""
     _default_key_path() -> String
 
 The default location of the cached free-key file,
 `\$XDG_CACHE_HOME/quicopt/free_key` (falling back to `~/.cache` when the variable is
-unset).
+unset), unless [`KEY_PATH_ENV`](@ref) overrides the whole path.
 """
-_default_key_path() =
+function _default_key_path()
+    override = get(ENV, KEY_PATH_ENV, "")
+    isempty(override) || return expanduser(override)
     joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "quicopt", "free_key")
+end
+
+"""
+    _read_key(path) -> String
+
+The cached key, or `""` when there is nothing usable to read. A missing or
+unreadable cache is not an error — it just means this caller has no key yet and the
+next call mints one.
+"""
+_read_key(path::AbstractString) =
+    isfile(path) ? (try String(strip(read(path, String))) catch; "" end) : ""
+
+"""
+    _write_key(path, key)
+
+Persist `key` at `path`, atomically and readable only by its owner.
+
+The key is a credential, so the file is `0o600`; the write goes to a temp file in
+the same directory and is then `mv`ed into place, so a crash or a concurrent writer
+can never leave a truncated key behind for the next run to send. Caching is
+best-effort: an unwritable cache (read-only home, a container without `HOME`) warns
+rather than throwing, since the solve itself succeeded and failing it over a cache
+miss would be worse than re-minting.
+"""
+function _write_key(path::AbstractString, key::AbstractString)
+    try
+        mkpath(dirname(path))
+        tmp, io = mktemp(dirname(path))
+        write(io, key)
+        close(io)
+        chmod(tmp, 0o600)
+        mv(tmp, path; force = true)
+    catch e
+        @warn "could not cache the Quicopt free key; every run will mint a new key — \
+               set $KEY_PATH_ENV to a writable location" path exception = e
+    end
+end
 
 """
     QuicoptError(status, reason, message, display)
@@ -111,6 +160,68 @@ function _meta_query(source_language::AbstractString, project::AbstractString)
 end
 
 """
+    _auth(tok) -> Vector{Pair{String,String}}
+
+The `Authorization: Bearer` header for `tok`, or no headers at all when `tok` is
+empty — a keyless request, which is what makes the server mint.
+"""
+_auth(tok::AbstractString) =
+    isempty(tok) ? Pair{String,String}[] : ["Authorization" => "Bearer " * tok]
+
+"""
+    _submit(transport, url, tok, bytes) -> NamedTuple
+
+POST the wire `bytes` to `url`, authenticating with `tok` when it is non-empty.
+"""
+_submit(transport, url::AbstractString, tok::AbstractString, bytes) =
+    transport(:POST, url, ["Content-Type" => "application/octet-stream"; _auth(tok)], bytes)
+
+"""
+    _submit_authenticated(transport, url, bytes, tok, from_cache, key_path) -> (resp, tok)
+
+Submit, retrying **once** keyless if a *cached* key is rejected, and return the
+response together with the token that was ultimately accepted.
+
+A cache file can outlive the key it holds (the server was reset, the key was
+revoked, the file was copied from another machine), and a stale key would otherwise
+401 every call forever. The retry is deliberately narrow: only a key read from disk
+is discarded (`from_cache`), never one minted in this run and never a caller-supplied
+`key`. A run can therefore mint at most one key beyond the stale one, so the
+recovery path can never itself become the mint loop it exists to fix.
+"""
+function _submit_authenticated(transport, url::AbstractString, bytes, tok::AbstractString,
+                               from_cache::Bool, key_path::AbstractString)
+    resp = _submit(transport, url, tok, bytes)
+    if resp.status == 401 && from_cache
+        rm(key_path; force = true)
+        return _submit(transport, url, "", bytes), ""
+    end
+    return resp, tok
+end
+
+"""
+    _await_job(transport, base_url, job_id, auth, poll, timeout) -> Vector{UInt8}
+
+Poll `job_id` until the worker reports `done`/`failed`, then return the raw body of
+its result. Throws [`QuicoptError`](@ref) on a non-2xx poll, or errors once
+`timeout` seconds have elapsed.
+"""
+function _await_job(transport, base_url::AbstractString, job_id::AbstractString,
+                    auth, poll::Real, timeout::Real)
+    deadline = time() + timeout
+    while true
+        st = transport(:GET, string(base_url, "/v1/jobs/", job_id), auth, UInt8[])
+        st.status >= 400 && throw(_error(st))
+        String(JSON3.read(st.body).status) in ("done", "failed") && break
+        time() > deadline && error("QuicoptClient: job $job_id did not finish within $(timeout)s")
+        sleep(poll)
+    end
+    res = transport(:GET, string(base_url, "/v1/jobs/", job_id, "/result"), auth, UInt8[])
+    res.status >= 400 && throw(_error(res))
+    return res.body
+end
+
+"""
     solve(bytes; base_url, key, source_language, project, key_path, async, poll, timeout, silent, transport) -> JSON3.Object
 
 POST already-encoded wire `bytes` and return the parsed JSON result (`status`,
@@ -120,7 +231,9 @@ server — the worker warmup can 504 a sync call); otherwise it is one `/v1/solv
 Pass `key` to authenticate with a specific key you already hold (e.g. a
 distributed internal/test key) — it is used as-is and never written to disk.
 Otherwise, on the first keyless call the server mints a free key, cached at
-`key_path` and replayed as a Bearer token thereafter. `source_language` and
+`key_path` (`0o600`, see [`KEY_PATH_ENV`](@ref)) and replayed as a Bearer token
+thereafter — including by later runs, so one caller keeps one key. A cached key the
+server rejects is discarded and re-minted once. `source_language` and
 `project` tag the call (which front-end authored it; a project label for
 per-project invoicing) — sent as query params, not baked into the model. A
 non-2xx response throws [`QuicoptError`](@ref). `silent=true` suppresses printing
@@ -137,35 +250,22 @@ function solve(bytes::AbstractVector{UInt8};
     # An explicit `key` is used as-is and never persisted; otherwise fall back to
     # the cached free key (minting one on the first keyless call).
     explicit = !isempty(key)
-    tok = explicit ? String(key) : (isfile(key_path) ? String(strip(read(key_path, String))) : "")
-    headers = ["Content-Type" => "application/octet-stream"]
-    isempty(tok) || push!(headers, "Authorization" => "Bearer " * tok)
+    tok = explicit ? String(key) : _read_key(key_path)
+    from_cache = !explicit && !isempty(tok)
 
     submit_url = string(base_url, async ? "/v1/jobs" : "/v1/solve", _meta_query(source_language, project))
-    resp = transport(:POST, submit_url, headers, bytes)
+    resp, tok = _submit_authenticated(transport, submit_url, bytes, tok, from_cache, key_path)
     resp.status >= 400 && throw(_error(resp))
 
     if !explicit && isempty(tok) && !isempty(resp.api_key)  # cache the minted key, then use it below
-        mkpath(dirname(key_path))
-        write(key_path, resp.api_key)
+        _write_key(key_path, resp.api_key)
         tok = String(resp.api_key)
         silent || @info "minted a free Quicopt key (cached at $key_path)"
     end
 
     async || return _finish(JSON3.read(resp.body), silent)
 
-    # async: poll the job to completion, then fetch its result
-    auth = isempty(tok) ? Pair{String,String}[] : ["Authorization" => "Bearer " * tok]
-    job_id = String(JSON3.read(resp.body).job_id)
-    deadline = time() + timeout
-    while true
-        st = transport(:GET, string(base_url, "/v1/jobs/", job_id), auth, UInt8[])
-        st.status >= 400 && throw(_error(st))
-        String(JSON3.read(st.body).status) in ("done", "failed") && break
-        time() > deadline && error("QuicoptClient: job $job_id did not finish within $(timeout)s")
-        sleep(poll)
-    end
-    res = transport(:GET, string(base_url, "/v1/jobs/", job_id, "/result"), auth, UInt8[])
-    res.status >= 400 && throw(_error(res))
-    return _finish(JSON3.read(res.body), silent)
+    body = _await_job(transport, base_url, String(JSON3.read(resp.body).job_id),
+                      _auth(tok), poll, timeout)
+    return _finish(JSON3.read(body), silent)
 end
