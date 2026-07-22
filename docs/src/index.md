@@ -33,8 +33,11 @@ result = solve(m)                      # POSTs to the service; prints the result
 @show result.status result.objective result.solution
 ```
 
-The first call mints a free API key (cached at `~/.cache/quicopt/free_key`) and
-replays it on later calls. Target a specific server with `solve(m; base_url = "…")`,
+The first call mints a free API key, cached at `$XDG_CACHE_HOME/quicopt/free_key`
+(`~/.cache/…` by default, `0o600`) and replayed on every later call — including from
+later runs, so one caller keeps one key. Point `QUICOPT_KEY_PATH` at durable storage
+where the home directory does not survive the run (CI, containers), or every run
+mints a new key. Target a specific server with `solve(m; base_url = "…")`,
 and use `async = true` for the first call against a freshly-booted server (its
 worker warmup can time out a synchronous call).
 
