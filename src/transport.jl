@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: (c) 2026 Tim Bode, PGI-12, Forschungszentrum Jülich
-# ── transport: ship the wire bytes to the Quicopt service ────────────────────
+# ── sending: ship the encoded model to the Quicopt service ───────────────────
 #
-# `solve(model)` imports + encodes the model and has the service solve it. Two
+# `solve(model)` reads + encodes the model and has the service solve it. Two
 # paths, same parsed-JSON result:
 #   • sync  (default)      — POST /v1/solve; the server waits for the worker (≤60s).
 #   • async (`async=true`) — POST /v1/jobs, poll GET /v1/jobs/{id} to completion,
@@ -137,8 +137,8 @@ _finish(result, silent) = (silent || (haskey(result, :display) && println(result
 """
     solve(model::JuMP.Model; kwargs...) -> JSON3.Object
 
-Import `model`, encode it to wire bytes, and solve it via the Quicopt service.
-Tags the call with `source_language = "jump"` (the modelling front-end) unless
+Read `model`, encode it, and solve it on the Quicopt service. Tags the call with
+`source_language = "jump"` (the modeling library it was written in) unless
 overridden. See the byte method below for the keyword arguments (incl. `project`).
 """
 solve(model::JuMP.Model; source_language::AbstractString = "jump", kwargs...) =
@@ -149,7 +149,7 @@ solve(model::JuMP.Model; source_language::AbstractString = "jump", kwargs...) =
 
 Build the `?source_language=…&project_id=…` query suffix carrying the optional
 per-call metadata tags (each omitted when empty, values URL-escaped). These ride
-the query string, not the wire bytes — the model is the mathematics; these are
+the query string, not the encoded model — the model is the mathematics; these are
 request/billing attributes. Returns `""` when both are empty.
 """
 function _meta_query(source_language::AbstractString, project::AbstractString)
@@ -171,7 +171,8 @@ _auth(tok::AbstractString) =
 """
     _submit(transport, url, tok, bytes) -> NamedTuple
 
-POST the wire `bytes` to `url`, authenticating with `tok` when it is non-empty.
+POST the encoded model `bytes` to `url`, authenticating with `tok` when it is
+non-empty.
 """
 _submit(transport, url::AbstractString, tok::AbstractString, bytes) =
     transport(:POST, url, ["Content-Type" => "application/octet-stream"; _auth(tok)], bytes)
@@ -224,7 +225,7 @@ end
 """
     solve(bytes; base_url, key, source_language, project, key_path, async, poll, timeout, silent, transport) -> JSON3.Object
 
-POST already-encoded wire `bytes` and return the parsed JSON result (`status`,
+POST an already-encoded model and return the parsed JSON result (`status`,
 `objective`, `feasible`, `solution`, `display`, …). `async=true` submits to
 `/v1/jobs` and polls to completion (use it for the first call against a cold
 server — the worker warmup can 504 a sync call); otherwise it is one `/v1/solve`.
@@ -234,7 +235,7 @@ Otherwise, on the first keyless call the server mints a free key, cached at
 `key_path` (`0o600`, see [`KEY_PATH_ENV`](@ref)) and replayed as a Bearer token
 thereafter — including by later runs, so one caller keeps one key. A cached key the
 server rejects is discarded and re-minted once. `source_language` and
-`project` tag the call (which front-end authored it; a project label for
+`project` tag the call (which modeling library wrote it; a project label for
 per-project invoicing) — sent as query params, not baked into the model. A
 non-2xx response throws [`QuicoptError`](@ref). `silent=true` suppresses printing
 the result banner.

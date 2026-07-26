@@ -18,8 +18,8 @@ makedocs(
     pages = [
         "Home" => "index.md",
         "API reference" => [
-            "Modeling"  => "api/modeling.md",
-            "Transport" => "api/transport.md",
+            "Modeling" => "api/modeling.md",
+            "Solving"  => "api/transport.md",
         ],
     ],
 )

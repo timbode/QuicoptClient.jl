@@ -1,6 +1,6 @@
 # Modeling
 
-Convert a JuMP model into the Quicopt wire `Program` and serialize it to bytes.
+Turn a JuMP model into a Quicopt `Program` and encode it to bytes.
 
 ```@docs
 QuicoptClient.import_model
@@ -37,4 +37,5 @@ QuicoptClient.set_scenarios
 QuicoptClient.smean
 QuicoptClient.scvar
 QuicoptClient.sfreq_leq
+QuicoptClient.sfreq_geq
 ```
