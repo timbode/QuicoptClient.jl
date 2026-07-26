@@ -16,7 +16,8 @@ import JuMP
 const MOI = JuMP.MOI
 import ProtoBuf as PB
 
-export import_model, solve, QuicoptError
+export import_model, solve, QuicoptError,
+       set_source, set_scenarios, smean, scvar, sfreq_leq, sfreq_geq
 
 include("proto/quicopt/quicopt.jl")   # ProtoBuf.jl-generated wire structs (module quicopt.modeler.v1)
 include("wire.jl")                    # generated structs ↔ bytes (the conformant codec)
@@ -26,9 +27,11 @@ include("wire.jl")                    # generated structs ↔ bytes (the conform
 
 Operators the client emits — mirrors the service's published operator catalog. The
 server's decoded `Catalog` is the final arbiter; an MOI head outside this set is a
-coverage gap to register service-side, never papered over here.
+coverage gap to register service-side, never papered over here. The last four are
+the scenario aggregators of the stochastic layer (see [`set_source`](@ref)).
 """
-const _CATALOG = Set((:+, :-, :*, :/, :^, :sin, :cos, :exp, :log, :sqrt, :abs))
+const _CATALOG = Set((:+, :-, :*, :/, :^, :sin, :cos, :exp, :log, :sqrt, :abs,
+                      :max, :min, :smean, :scvar, :sfreq_leq, :sfreq_geq))
 
 # ── MOI scalar function → wire Expression ────────────────────────────────────
 
@@ -131,6 +134,132 @@ _bound!(lo, hi, dom, vi, ::MOI.Integer)      = (dom[vi] = _pb.Domain.INTEGER)
 
 # ── function-in-set constraint → wire Constraint (Zero / Nonneg) ─────────────
 
+# ── the stochastic layer: sources on JuMP variables, aggregators as heads ────
+#
+# A stochastic model is authored in JuMP like any other — the stochastic
+# constructs are just more functions. A *source* (a random variable) is an
+# ordinary JuMP variable marked with `set_source`; the importer emits it as a
+# named source declaration and rewrites its occurrences into source references,
+# so it never becomes a decision variable. The *aggregators* (`smean`, `scvar`,
+# `sfreq_leq`, `sfreq_geq`) build nonlinear expression nodes with stochastic
+# operator heads; JuMP stores them symbolically and this package ships them as
+# data, so no local evaluator is ever involved — such models solve through the
+# service, not through a locally attached optimizer.
+
+# model.ext slot: per-model stochastic declarations, written by the setters
+# below and read by `import_model`.
+mutable struct _Stochastic
+    sources::Dict{MOI.VariableIndex,Pair{Symbol,Any}}  # vi => name => spec
+    scenarios::Int                                     # 0 = unset (server default)
+    seed::Int                                          # 0 = unset (server default)
+end
+_stoch!(m::JuMP.Model) = get!(() -> _Stochastic(Dict{MOI.VariableIndex,Pair{Symbol,Any}}(), 0, 0),
+                              m.ext, :quicopt_stochastic)::_Stochastic
+_stoch(m::JuMP.Model)  = get(m.ext, :quicopt_stochastic, nothing)
+
+function _source_name(v::JuMP.VariableRef, name)
+    nm = name === nothing ? Symbol(JuMP.name(v)) : Symbol(name)
+    (name === nothing && isempty(JuMP.name(v))) &&
+        error("source variable is anonymous — pass a name: set_source(m, v, …; name = :demand)")
+    nm
+end
+
+function _register_source!(m::JuMP.Model, v::JuMP.VariableRef, nm::Symbol, spec)
+    st = _stoch!(m)
+    vi = JuMP.index(v)
+    for (ovi, decl) in st.sources
+        ovi == vi && continue
+        decl.first == nm &&
+            error("source name :$nm is already taken by another variable — " *
+                  "each source is one random variable; declare independent " *
+                  "sources as separate variables with distinct names")
+    end
+    st.sources[vi] = nm => spec
+    v
+end
+
+"""
+    set_source(model, v, head::Symbol, params...; name = Symbol(JuMP.name(v)))
+
+Declare the JuMP variable `v` as a *parametric stochastic source*: a draw from
+the distribution `head` (an operator from the service catalog, e.g. `:normal`)
+with the given parameters. Parameters may be numbers or deterministic JuMP
+expressions. The variable stops being a decision variable — it becomes a named
+random variable, and every use of `v` in the objective or constraints refers to
+the *same* draw (per scenario). Declare independent sources as separate
+variables.
+
+Do not put bounds or integrality on `v` — a source carries a distribution, not
+a domain — and close every stochastic subexpression with an aggregator
+([`smean`](@ref), [`scvar`](@ref), [`sfreq_leq`](@ref), [`sfreq_geq`](@ref))
+before it reaches the objective or a constraint root.
+
+    set_source(model, v, data::AbstractVector{<:Real}; name = …)
+
+The empirical form: `v` takes the given scenario column, one value per
+scenario (`length(data)` must equal the count passed to
+[`set_scenarios`](@ref)). Several empirical columns are aligned by scenario
+index, so jointly-drawn columns preserve their correlation.
+"""
+set_source(m::JuMP.Model, v::JuMP.VariableRef, head::Symbol, params...; name = nothing) =
+    _register_source!(m, v, _source_name(v, name), (head, collect(params)))
+set_source(m::JuMP.Model, v::JuMP.VariableRef, data::AbstractVector{<:Real}; name = nothing) =
+    _register_source!(m, v, _source_name(v, name), Float64.(data))
+
+"""
+    set_scenarios(model, n; seed = nothing)
+
+Set the number of scenarios of the sampled instance (and optionally the draw
+seed, ≥ 1). Both are *model data*: they pin the instance, so two solves of the
+same model see the same draws. Unset values fall back to the server's defaults
+(one scenario; its documented default seed).
+"""
+function set_scenarios(m::JuMP.Model, n::Integer; seed::Union{Integer,Nothing} = nothing)
+    n ≥ 1 || error("scenarios must be ≥ 1, got $n")
+    st = _stoch!(m)
+    st.scenarios = Int(n)
+    if seed !== nothing
+        seed ≥ 1 || error("scenario seed must be ≥ 1 (0 is reserved for the server default)")
+        st.seed = Int(seed)
+    end
+    nothing
+end
+
+"""
+    smean(x) -> NonlinearExpr
+
+The scenario mean `E[x]` — the basic stochastic → deterministic aggregator.
+Symbolic: JuMP stores the node and the service evaluates it; attaching a local
+optimizer to a model containing one will fail with an unsupported-operator
+error, which is expected.
+"""
+smean(x) = JuMP.NonlinearExpr(:smean, x)
+
+"""
+    scvar(x, α) -> NonlinearExpr
+
+The conditional value-at-risk of `x` at level `α ∈ (0, 1)` — the expected value
+of `x` over its worst `(1 − α)` tail. `α` must be a plain number.
+"""
+scvar(x, α::Real) = JuMP.NonlinearExpr(:scvar, x, Float64(α))
+
+"""
+    sfreq_leq(x, τ) -> NonlinearExpr
+    sfreq_geq(x, τ) -> NonlinearExpr
+
+The scenario frequency of `x ≤ τ` (resp. `x ≥ τ`) — the fraction of scenarios
+satisfying the comparison, for chance constraints such as
+`@constraint(m, sfreq_leq(demand - stock, 0.0) >= 0.9)`. `τ` must be a plain
+number.
+"""
+sfreq_leq(x, τ::Real) = JuMP.NonlinearExpr(:sfreq_leq, x, Float64(τ))
+sfreq_geq(x, τ::Real) = JuMP.NonlinearExpr(:sfreq_geq, x, Float64(τ))
+@doc (@doc sfreq_leq) sfreq_geq
+
+# a distribution parameter: a number, or a deterministic JuMP scalar expression
+_param_expr(p::Real, var) = _const(p)
+_param_expr(p, var)       = _expr(JuMP.moi_function(p), var)
+
 """
     _minus(f, c) -> Expression
 
@@ -172,12 +301,20 @@ proto struct). Imports at the MOI level: each variable becomes a scalar `VarDecl
 constraint become wire expressions (`ScalarNonlinearFunction`/affine/quadratic →
 the expression graph; `EqualTo` → `Zero`, `LessThan`/`GreaterThan`/`Interval` →
 `Nonneg`). The result is a flat `Program` (no index sets); ±Inf bounds pass through.
+
+Variables marked with [`set_source`](@ref) are emitted as named source
+declarations instead of decision variables, their uses rewritten to source
+references; the scenario count and seed from [`set_scenarios`](@ref) ride along
+as model data. A model with no stochastic marks emits exactly what it always
+did.
 """
 function import_model(m::JuMP.Model)
     b = JuMP.backend(m)
     vis = MOI.get(b, MOI.ListOfVariableIndices())
+    st = _stoch(m)
+    srcs = st === nothing ? Dict{MOI.VariableIndex,Pair{Symbol,Any}}() : st.sources
     varname(vi) = Symbol("x", vi.value)
-    var(vi) = _var(varname(vi))
+    var(vi) = haskey(srcs, vi) ? _source_ref(srcs[vi].first) : _var(varname(vi))
 
     lo  = Dict(vi => -Inf for vi in vis)
     hi  = Dict(vi =>  Inf for vi in vis)
@@ -185,12 +322,18 @@ function import_model(m::JuMP.Model)
     for (F, S) in MOI.get(b, MOI.ListOfConstraintTypesPresent())
         F === MOI.VariableIndex || continue
         for ci in MOI.get(b, MOI.ListOfConstraintIndices{F,S}())
-            _bound!(lo, hi, dom, MOI.get(b, MOI.ConstraintFunction(), ci), MOI.get(b, MOI.ConstraintSet(), ci))
+            vi = MOI.get(b, MOI.ConstraintFunction(), ci)
+            haskey(srcs, vi) &&
+                error("source :$(srcs[vi].first) carries bounds or a domain — a source " *
+                      "is a random variable with a distribution, not a decision variable; " *
+                      "declare it with @variable(m, name) and nothing else")
+            _bound!(lo, hi, dom, vi, MOI.get(b, MOI.ConstraintSet(), ci))
         end
     end
 
     vars = _pb.VarDecl[]
     for vi in vis
+        haskey(srcs, vi) && continue   # a source is declared, not a decision variable
         l, u = lo[vi], hi[vi]   # ±Inf passes through: an unbounded direction is the server's to judge
         push!(vars, _pb.VarDecl(name = String(varname(vi)), axes = String[], domain = dom[vi],
                                 lower = _scalarbound(l), upper = _scalarbound(u), start = clamp(0.0, l, u)))
@@ -208,9 +351,23 @@ function import_model(m::JuMP.Model)
         end
     end
 
+    # source declarations, in canonical (name-sorted) order
+    decls = _pb.SourceDecl[]
+    for (vi, decl) in sort(collect(srcs); by = p -> String(p.second.first))
+        nm, spec = decl
+        kind = spec isa Vector{Float64} ?
+            PB.OneOf(:empirical,  _pb.Empirical(data = spec)) :
+            PB.OneOf(:parametric, _pb.Parametric(head = String(spec[1]),
+                         params = _pb.Expression[_param_expr(p, var) for p in spec[2]]))
+        push!(decls, _pb.SourceDecl(name = String(nm), kind = kind))
+    end
+
     _pb.Program(sets = _pb.IndexSet[], indexed_sets = _pb.IndexedSet[], params = _pb.ParamTable[],
                 vars = vars, objective = objective, sense = sense,
-                constraints = cons, fix = _pb.FixEntry[])
+                constraints = cons, fix = _pb.FixEntry[],
+                scenarios = st === nothing ? 0 : UInt64(st.scenarios),
+                scenario_seed = st === nothing ? 0 : UInt64(st.seed),
+                sources = decls)
 end
 
 include("transport.jl")   # solve(model) → POST /v1/solve → parsed result

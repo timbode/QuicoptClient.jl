@@ -59,6 +59,15 @@ applied to the child expressions `args`.
 _apply(op::Symbol, args::Vector)    = _pb.Expression(node = PB.OneOf(:apply, _pb.Apply(op = String(op), args = args)))
 
 """
+    _source_ref(name) -> Expression
+
+A stochastic-source reference node. Identity lives in the name: every
+`SourceRef` carrying the same name denotes the same random variable, so copies
+of a subtree never mint independent draws.
+"""
+_source_ref(name::Symbol) = _pb.Expression(node = PB.OneOf(:source, _pb.SourceRef(name = String(name))))
+
+"""
     _iszero(e) -> Bool
 
 Whether expression `e` is the additive-identity constant `Const(0.0)` — the test

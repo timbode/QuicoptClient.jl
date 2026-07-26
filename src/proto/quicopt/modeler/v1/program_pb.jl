@@ -7,17 +7,19 @@ import ProtoBuf as PB
 using ProtoBuf: OneOf
 using ProtoBuf.EnumX: @enumx
 
-export OpDef, Bound, IndexElem, Domain, Nonneg, Zero, Catalog, Index, IndexSet, VarDecl
-export SetRef, FixEntry, ParamRef, VarRef, ParamEntry, IndexedSetFibre, QuantBinding
-export ParamTable, IndexedSet, ParamData, Apply, ConSet, Indicator, Reduce, Constraint
-export Expression, Program
+export OpDef, SourceRef, Bound, IndexElem, Domain, Nonneg, Zero, Empirical, Catalog, Index
+export IndexSet, VarDecl, SetRef, FixEntry, ParamRef, VarRef, ParamEntry, IndexedSetFibre
+export QuantBinding, ParamTable, IndexedSet, ParamData, Apply, ConSet, Indicator
+export Parametric, Reduce, SourceDecl, Constraint, Expression, Program
 abstract type var"##Abstract#ConSet" end
 abstract type var"##Abstract#Constraint" end
 abstract type var"##Abstract#Indicator" end
+abstract type var"##Abstract#SourceDecl" end
 abstract type var"##Abstract#Program" end
 abstract type var"##Abstract#Apply" end
 abstract type var"##Abstract#Reduce" end
 abstract type var"##Abstract#Expression" end
+abstract type var"##Abstract#Parametric" end
 
 
 struct OpDef
@@ -60,6 +62,37 @@ function PB._encoded_size(x::OpDef)
     !isempty(x.op) && (encoded_size += PB._encoded_size(x.op, 1))
     x.arity != zero(Int32) && (encoded_size += PB._encoded_size(x.arity, 2))
     !isempty(x.tags) && (encoded_size += PB._encoded_size(x.tags, 3))
+    return encoded_size
+end
+
+struct SourceRef
+    name::String
+end
+SourceRef(;name = "") = SourceRef(name)
+PB.default_values(::Type{SourceRef}) = (;name = "")
+PB.field_numbers(::Type{SourceRef}) = (;name = 1)
+
+function PB.decode(d::PB.AbstractProtoDecoder, ::Type{<:SourceRef}, _endpos::Int=0, _group::Bool=false)
+    name = ""
+    while !PB.message_done(d, _endpos, _group)
+        field_number, wire_type = PB.decode_tag(d)
+        if field_number == 1
+            name = PB.decode(d, String)
+        else
+            Base.skip(d, wire_type)
+        end
+    end
+    return SourceRef(name)
+end
+
+function PB.encode(e::PB.AbstractProtoEncoder, x::SourceRef)
+    initpos = position(e.io)
+    !isempty(x.name) && PB.encode(e, 1, x.name)
+    return position(e.io) - initpos
+end
+function PB._encoded_size(x::SourceRef)
+    encoded_size = 0
+    !isempty(x.name) && (encoded_size += PB._encoded_size(x.name, 1))
     return encoded_size
 end
 
@@ -192,6 +225,37 @@ function PB.encode(e::PB.AbstractProtoEncoder, x::Zero)
 end
 function PB._encoded_size(x::Zero)
     encoded_size = 0
+    return encoded_size
+end
+
+struct Empirical
+    data::Vector{Float64}
+end
+Empirical(;data = Vector{Float64}()) = Empirical(data)
+PB.default_values(::Type{Empirical}) = (;data = Vector{Float64}())
+PB.field_numbers(::Type{Empirical}) = (;data = 1)
+
+function PB.decode(d::PB.AbstractProtoDecoder, ::Type{<:Empirical}, _endpos::Int=0, _group::Bool=false)
+    data = PB.BufferedVector{Float64}()
+    while !PB.message_done(d, _endpos, _group)
+        field_number, wire_type = PB.decode_tag(d)
+        if field_number == 1
+            PB.decode!(d, wire_type, data)
+        else
+            Base.skip(d, wire_type)
+        end
+    end
+    return Empirical(data[])
+end
+
+function PB.encode(e::PB.AbstractProtoEncoder, x::Empirical)
+    initpos = position(e.io)
+    !isempty(x.data) && PB.encode(e, 1, x.data)
+    return position(e.io) - initpos
+end
+function PB._encoded_size(x::Empirical)
+    encoded_size = 0
+    !isempty(x.data) && (encoded_size += PB._encoded_size(x.data, 1))
     return encoded_size
 end
 
@@ -746,12 +810,22 @@ struct var"##Stub#Indicator" <: var"##Abstract#Indicator"
     inner::Union{Nothing,var"##Stub#ConSet"{var"##Stub#Indicator"}}
 end
 
+struct var"##Stub#Parametric"{T1<:var"##Abstract#Expression"} <: var"##Abstract#Parametric"
+    head::String
+    params::Vector{T1}
+end
+
 struct var"##Stub#Reduce"{T1<:var"##Abstract#Expression"} <: var"##Abstract#Reduce"
     op::String
     idx::String
     over::Union{Nothing,SetRef}
     body::Union{Nothing,T1}
     cond::Union{Nothing,T1}
+end
+
+struct var"##Stub#SourceDecl"{T1<:var"##Abstract#Expression"} <: var"##Abstract#SourceDecl"
+    name::String
+    kind::Union{Nothing,OneOf{<:Union{var"##Stub#Parametric"{T1},Empirical}}}
 end
 
 struct var"##Stub#Constraint"{T1<:var"##Abstract#Expression"} <: var"##Abstract#Constraint"
@@ -761,7 +835,7 @@ struct var"##Stub#Constraint"{T1<:var"##Abstract#Expression"} <: var"##Abstract#
 end
 
 struct var"##Stub#Expression" <: var"##Abstract#Expression"
-    node::Union{Nothing,OneOf{<:Union{Float64,ParamRef,VarRef,var"##Stub#Apply"{var"##Stub#Expression"},var"##Stub#Reduce"{var"##Stub#Expression"}}}}
+    node::Union{Nothing,OneOf{<:Union{Float64,ParamRef,VarRef,var"##Stub#Apply"{var"##Stub#Expression"},var"##Stub#Reduce"{var"##Stub#Expression"},SourceRef}}}
 end
 
 struct var"##Stub#Program" <: var"##Abstract#Program"
@@ -773,6 +847,9 @@ struct var"##Stub#Program" <: var"##Abstract#Program"
     sense::String
     constraints::Vector{var"##Stub#Constraint"{var"##Stub#Expression"}}
     fix::Vector{FixEntry}
+    scenarios::UInt64
+    scenario_seed::UInt64
+    sources::Vector{var"##Stub#SourceDecl"{var"##Stub#Expression"}}
 end
 
 const Apply = var"##Stub#Apply"{var"##Stub#Expression"}
@@ -893,6 +970,40 @@ function PB._encoded_size(x::Indicator)
     return encoded_size
 end
 
+const Parametric = var"##Stub#Parametric"{var"##Stub#Expression"}
+Parametric(;head = "", params = Vector{Expression}()) = Parametric(head, params)
+PB.default_values(::Type{Parametric}) = (;head = "", params = Vector{Expression}())
+PB.field_numbers(::Type{Parametric}) = (;head = 1, params = 2)
+
+function PB.decode(d::PB.AbstractProtoDecoder, ::Type{<:Parametric}, _endpos::Int=0, _group::Bool=false)
+    head = ""
+    params = PB.BufferedVector{Expression}()
+    while !PB.message_done(d, _endpos, _group)
+        field_number, wire_type = PB.decode_tag(d)
+        if field_number == 1
+            head = PB.decode(d, String)
+        elseif field_number == 2
+            PB.decode!(d, params)
+        else
+            Base.skip(d, wire_type)
+        end
+    end
+    return Parametric(head, params[])
+end
+
+function PB.encode(e::PB.AbstractProtoEncoder, x::Parametric)
+    initpos = position(e.io)
+    !isempty(x.head) && PB.encode(e, 1, x.head)
+    !isempty(x.params) && PB.encode(e, 2, x.params)
+    return position(e.io) - initpos
+end
+function PB._encoded_size(x::Parametric)
+    encoded_size = 0
+    !isempty(x.head) && (encoded_size += PB._encoded_size(x.head, 1))
+    !isempty(x.params) && (encoded_size += PB._encoded_size(x.params, 2))
+    return encoded_size
+end
+
 const Reduce = var"##Stub#Reduce"{var"##Stub#Expression"}
 Reduce(;op = "", idx = "", over = nothing, body = nothing, cond = nothing) = Reduce(op, idx, over, body, cond)
 PB.default_values(::Type{Reduce}) = (;op = "", idx = "", over = nothing, body = nothing, cond = nothing)
@@ -942,6 +1053,55 @@ function PB._encoded_size(x::Reduce)
     return encoded_size
 end
 
+const SourceDecl = var"##Stub#SourceDecl"{var"##Stub#Expression"}
+SourceDecl(;name = "", kind = nothing) = SourceDecl(name, kind)
+PB.oneof_field_types(::Type{SourceDecl}) = (;
+    kind = (;parametric=Parametric, empirical=Empirical),
+)
+PB.default_values(::Type{SourceDecl}) = (;name = "", parametric = nothing, empirical = nothing)
+PB.field_numbers(::Type{SourceDecl}) = (;name = 1, parametric = 2, empirical = 3)
+
+function PB.decode(d::PB.AbstractProtoDecoder, ::Type{<:SourceDecl}, _endpos::Int=0, _group::Bool=false)
+    name = ""
+    kind = nothing
+    while !PB.message_done(d, _endpos, _group)
+        field_number, wire_type = PB.decode_tag(d)
+        if field_number == 1
+            name = PB.decode(d, String)
+        elseif field_number == 2
+            kind = OneOf(:parametric, PB.decode(d, Ref{Parametric}))
+        elseif field_number == 3
+            kind = OneOf(:empirical, PB.decode(d, Ref{Empirical}))
+        else
+            Base.skip(d, wire_type)
+        end
+    end
+    return SourceDecl(name, kind)
+end
+
+function PB.encode(e::PB.AbstractProtoEncoder, x::SourceDecl)
+    initpos = position(e.io)
+    !isempty(x.name) && PB.encode(e, 1, x.name)
+    if isnothing(x.kind);
+    elseif x.kind.name === :parametric
+        PB.encode(e, 2, x.kind[]::Parametric)
+    elseif x.kind.name === :empirical
+        PB.encode(e, 3, x.kind[]::Empirical)
+    end
+    return position(e.io) - initpos
+end
+function PB._encoded_size(x::SourceDecl)
+    encoded_size = 0
+    !isempty(x.name) && (encoded_size += PB._encoded_size(x.name, 1))
+    if isnothing(x.kind);
+    elseif x.kind.name === :parametric
+        encoded_size += PB._encoded_size(x.kind[]::Parametric, 2)
+    elseif x.kind.name === :empirical
+        encoded_size += PB._encoded_size(x.kind[]::Empirical, 3)
+    end
+    return encoded_size
+end
+
 const Constraint = var"##Stub#Constraint"{var"##Stub#Expression"}
 Constraint(;f = nothing, set = nothing, over = Vector{QuantBinding}()) = Constraint(f, set, over)
 PB.default_values(::Type{Constraint}) = (;f = nothing, set = nothing, over = Vector{QuantBinding}())
@@ -984,10 +1144,10 @@ end
 const Expression = var"##Stub#Expression"
 Expression(;node = nothing) = Expression(node)
 PB.oneof_field_types(::Type{Expression}) = (;
-    node = (;constant=Float64, param=ParamRef, var=VarRef, apply=Apply, reduce=Reduce),
+    node = (;constant=Float64, param=ParamRef, var=VarRef, apply=Apply, reduce=Reduce, source=SourceRef),
 )
-PB.default_values(::Type{Expression}) = (;constant = zero(Float64), param = nothing, var = nothing, apply = nothing, reduce = nothing)
-PB.field_numbers(::Type{Expression}) = (;constant = 1, param = 2, var = 3, apply = 4, reduce = 5)
+PB.default_values(::Type{Expression}) = (;constant = zero(Float64), param = nothing, var = nothing, apply = nothing, reduce = nothing, source = nothing)
+PB.field_numbers(::Type{Expression}) = (;constant = 1, param = 2, var = 3, apply = 4, reduce = 5, source = 6)
 
 function PB.decode(d::PB.AbstractProtoDecoder, ::Type{<:Expression}, _endpos::Int=0, _group::Bool=false)
     node = nothing
@@ -1003,6 +1163,8 @@ function PB.decode(d::PB.AbstractProtoDecoder, ::Type{<:Expression}, _endpos::In
             node = OneOf(:apply, PB.decode(d, Ref{Apply}))
         elseif field_number == 5
             node = OneOf(:reduce, PB.decode(d, Ref{Reduce}))
+        elseif field_number == 6
+            node = OneOf(:source, PB.decode(d, Ref{SourceRef}))
         else
             Base.skip(d, wire_type)
         end
@@ -1023,6 +1185,8 @@ function PB.encode(e::PB.AbstractProtoEncoder, x::Expression)
         PB.encode(e, 4, x.node[]::Apply)
     elseif x.node.name === :reduce
         PB.encode(e, 5, x.node[]::Reduce)
+    elseif x.node.name === :source
+        PB.encode(e, 6, x.node[]::SourceRef)
     end
     return position(e.io) - initpos
 end
@@ -1039,14 +1203,16 @@ function PB._encoded_size(x::Expression)
         encoded_size += PB._encoded_size(x.node[]::Apply, 4)
     elseif x.node.name === :reduce
         encoded_size += PB._encoded_size(x.node[]::Reduce, 5)
+    elseif x.node.name === :source
+        encoded_size += PB._encoded_size(x.node[]::SourceRef, 6)
     end
     return encoded_size
 end
 
 const Program = var"##Stub#Program"
-Program(;sets = Vector{IndexSet}(), indexed_sets = Vector{IndexedSet}(), params = Vector{ParamTable}(), vars = Vector{VarDecl}(), objective = nothing, sense = "", constraints = Vector{Constraint}(), fix = Vector{FixEntry}()) = Program(sets, indexed_sets, params, vars, objective, sense, constraints, fix)
-PB.default_values(::Type{Program}) = (;sets = Vector{IndexSet}(), indexed_sets = Vector{IndexedSet}(), params = Vector{ParamTable}(), vars = Vector{VarDecl}(), objective = nothing, sense = "", constraints = Vector{Constraint}(), fix = Vector{FixEntry}())
-PB.field_numbers(::Type{Program}) = (;sets = 1, indexed_sets = 2, params = 3, vars = 4, objective = 5, sense = 6, constraints = 7, fix = 8)
+Program(;sets = Vector{IndexSet}(), indexed_sets = Vector{IndexedSet}(), params = Vector{ParamTable}(), vars = Vector{VarDecl}(), objective = nothing, sense = "", constraints = Vector{Constraint}(), fix = Vector{FixEntry}(), scenarios = zero(UInt64), scenario_seed = zero(UInt64), sources = Vector{SourceDecl}()) = Program(sets, indexed_sets, params, vars, objective, sense, constraints, fix, scenarios, scenario_seed, sources)
+PB.default_values(::Type{Program}) = (;sets = Vector{IndexSet}(), indexed_sets = Vector{IndexedSet}(), params = Vector{ParamTable}(), vars = Vector{VarDecl}(), objective = nothing, sense = "", constraints = Vector{Constraint}(), fix = Vector{FixEntry}(), scenarios = zero(UInt64), scenario_seed = zero(UInt64), sources = Vector{SourceDecl}())
+PB.field_numbers(::Type{Program}) = (;sets = 1, indexed_sets = 2, params = 3, vars = 4, objective = 5, sense = 6, constraints = 7, fix = 8, scenarios = 9, scenario_seed = 10, sources = 11)
 
 function PB.decode(d::PB.AbstractProtoDecoder, ::Type{<:Program}, _endpos::Int=0, _group::Bool=false)
     sets = PB.BufferedVector{IndexSet}()
@@ -1057,6 +1223,9 @@ function PB.decode(d::PB.AbstractProtoDecoder, ::Type{<:Program}, _endpos::Int=0
     sense = ""
     constraints = PB.BufferedVector{Constraint}()
     fix = PB.BufferedVector{FixEntry}()
+    scenarios = zero(UInt64)
+    scenario_seed = zero(UInt64)
+    sources = PB.BufferedVector{SourceDecl}()
     while !PB.message_done(d, _endpos, _group)
         field_number, wire_type = PB.decode_tag(d)
         if field_number == 1
@@ -1075,11 +1244,17 @@ function PB.decode(d::PB.AbstractProtoDecoder, ::Type{<:Program}, _endpos::Int=0
             PB.decode!(d, constraints)
         elseif field_number == 8
             PB.decode!(d, fix)
+        elseif field_number == 9
+            scenarios = PB.decode(d, UInt64)
+        elseif field_number == 10
+            scenario_seed = PB.decode(d, UInt64)
+        elseif field_number == 11
+            PB.decode!(d, sources)
         else
             Base.skip(d, wire_type)
         end
     end
-    return Program(sets[], indexed_sets[], params[], vars[], objective[], sense, constraints[], fix[])
+    return Program(sets[], indexed_sets[], params[], vars[], objective[], sense, constraints[], fix[], scenarios, scenario_seed, sources[])
 end
 
 function PB.encode(e::PB.AbstractProtoEncoder, x::Program)
@@ -1092,6 +1267,9 @@ function PB.encode(e::PB.AbstractProtoEncoder, x::Program)
     !isempty(x.sense) && PB.encode(e, 6, x.sense)
     !isempty(x.constraints) && PB.encode(e, 7, x.constraints)
     !isempty(x.fix) && PB.encode(e, 8, x.fix)
+    x.scenarios != zero(UInt64) && PB.encode(e, 9, x.scenarios)
+    x.scenario_seed != zero(UInt64) && PB.encode(e, 10, x.scenario_seed)
+    !isempty(x.sources) && PB.encode(e, 11, x.sources)
     return position(e.io) - initpos
 end
 function PB._encoded_size(x::Program)
@@ -1104,5 +1282,8 @@ function PB._encoded_size(x::Program)
     !isempty(x.sense) && (encoded_size += PB._encoded_size(x.sense, 6))
     !isempty(x.constraints) && (encoded_size += PB._encoded_size(x.constraints, 7))
     !isempty(x.fix) && (encoded_size += PB._encoded_size(x.fix, 8))
+    x.scenarios != zero(UInt64) && (encoded_size += PB._encoded_size(x.scenarios, 9))
+    x.scenario_seed != zero(UInt64) && (encoded_size += PB._encoded_size(x.scenario_seed, 10))
+    !isempty(x.sources) && (encoded_size += PB._encoded_size(x.sources, 11))
     return encoded_size
 end
