@@ -1,6 +1,6 @@
 name = "QuicoptClient"
 uuid = "e3379caf-a7d1-49bc-bad0-a3c1736f44f4"
-version = "0.3.0"
+version = "0.3.1"
 authors = ["Tim Bode"]
 
 [deps]
@@ -10,7 +10,7 @@ JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
 ProtoBuf = "3349acd9-ac6a-5e09-bcdb-63829b23a429"
 
 [compat]
-HTTP = "2.5"
+HTTP = "1.10, 2.5"
 JSON3 = "1.14"
 JuMP = "1.30"
 ProtoBuf = "1.3"
