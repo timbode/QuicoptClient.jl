@@ -1,8 +1,8 @@
 # QuicoptClient.jl
 
-[![Docs (stable)](https://img.shields.io/badge/docs-stable-blue.svg)](https://timbode.github.io/QuicoptClient.jl/stable/)
-[![Docs (dev)](https://img.shields.io/badge/docs-dev-blue.svg)](https://timbode.github.io/QuicoptClient.jl/dev/)
-[![CI](https://github.com/timbode/QuicoptClient.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/timbode/QuicoptClient.jl/actions/workflows/CI.yml)
+[![Docs (stable)](https://img.shields.io/badge/docs-stable-blue.svg)](https://quicopt.github.io/QuicoptClient.jl/stable/)
+[![Docs (dev)](https://img.shields.io/badge/docs-dev-blue.svg)](https://quicopt.github.io/QuicoptClient.jl/dev/)
+[![CI](https://github.com/Quicopt/QuicoptClient.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/Quicopt/QuicoptClient.jl/actions/workflows/CI.yml)
 [![Version](https://juliahub.com/docs/General/QuicoptClient/stable/version.svg)](https://juliahub.com/ui/Packages/General/QuicoptClient)
 [![Julia 1.10+](https://img.shields.io/badge/julia-1.10%2B-9558B2.svg)](https://julialang.org)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
