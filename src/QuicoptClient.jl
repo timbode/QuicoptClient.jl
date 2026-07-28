@@ -260,8 +260,8 @@ the comparison holds. This is the aggregator behind a chance constraint —
 
     @constraint(m, prob(demand - stock, ≤, 0) >= 0.9)
 
-reads as *the probability that demand exceeds stock in no scenario is at least
-0.9*. The relation is an argument rather than part of the name so that it can
+reads as *demand is met in at least 90% of scenarios*. The relation is an
+argument rather than part of the name so that it can
 only bind to `x`: written as `prob_atmost(x, τ)` it would compete with the bound
 on the probability itself, which the constraint already carries.
 

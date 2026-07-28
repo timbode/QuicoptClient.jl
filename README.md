@@ -28,6 +28,45 @@ solving.
   first call against a freshly-started server, whose worker warmup can time out a
   sync call). A free API key is minted on first use and cached locally; the result
   is returned as parsed JSON. A non-2xx response raises a `QuicoptError`.
+- **`set_distribution` / `expectation` / `cvar` / `prob`** — say that part of the
+  model is uncertain, and optimize over what might happen rather than one guess.
+
+## Deciding under uncertainty
+
+Not every number in a model is known when you have to choose. Give a variable a
+distribution instead of a value, and it stops being something the solver picks
+and starts being something the world hands you:
+
+```julia
+using QuicoptClient, JuMP
+
+m = Model()
+@variable(m, 0 <= stock <= 200)          # decision: how much to hold
+@variable(m, demand)                     # random: what will be asked for
+set_distribution(m, demand, :normal, 100.0, 15.0)
+set_scenarios(m, 512; seed = 42)
+
+@objective(m, Min, 3stock + 10 * expectation(max(demand - stock, 0)))
+result = solve(m)
+```
+
+This is the newsvendor, and its answer is instructive: it is *not* to stock the
+average demand. Running out costs more than overstocking, so the optimum sits
+above the mean — the kind of asymmetry you get wrong by plugging in a best guess
+and solving deterministically.
+
+Every random quantity has to be closed by an aggregator before it reaches the
+objective or a constraint: `expectation` for the average, `cvar(loss, 0.95)` when
+the bad case matters more than the typical one, and `prob` for a chance
+constraint —
+
+```julia
+@constraint(m, prob(demand - stock, ≤, 0) >= 0.9)   # meet demand 90% of the time
+```
+
+Using `demand` twice refers to the *same* draw, so independent randomness means
+separate variables. `set_scenarios` is part of the model, not a solver knob: the
+same count and seed always describe the same problem.
 
 ## What travels
 

@@ -43,6 +43,31 @@ mints a new key. Target a specific server with `solve(m; base_url = "…")`,
 and use `async = true` for the first call against a freshly-booted server (its
 worker warmup can time out a synchronous call).
 
+## Deciding under uncertainty
+
+Not every number is known when you have to choose. Give a variable a distribution
+instead of a value and it stops being something the solver picks, becoming
+something the world hands you; aggregators turn the uncertain quantity back into
+one the objective can hold.
+
+```julia
+m = Model()
+@variable(m, 0 <= stock <= 200)          # decision: how much to hold
+@variable(m, demand)                     # random: what will be asked for
+set_distribution(m, demand, :normal, 100.0, 15.0)
+set_scenarios(m, 512; seed = 42)
+
+@objective(m, Min, 3stock + 10 * expectation(max(demand - stock, 0)))
+@constraint(m, prob(demand - stock, ≤, 0) >= 0.9)   # meet demand 90% of the time
+result = solve(m)
+```
+
+The answer is *not* to stock the average demand — running out costs more than
+overstocking, so the optimum sits above the mean. That asymmetry is exactly what
+a deterministic model built on a best guess throws away. See
+[Modeling](@ref) for the full surface: `expectation`, `cvar` for tail risk, and
+`prob` for chance constraints.
+
 ## What travels
 
 A `Program` is what a model *is* to Quicopt — variables, expressions and
@@ -58,7 +83,9 @@ equivalence, and it is why you compare decoded `Program`s, never raw bytes.
 
 ## API reference
 
-- [Modeling](@ref) — `import_model`, `encode`: JuMP model → `Program` → bytes.
+- [Modeling](@ref) — `import_model`, `encode`: JuMP model → `Program` → bytes;
+  and `set_distribution`, `expectation`, `cvar`, `prob` for models with
+  uncertainty.
 - [Solving](@ref) — `solve`, `QuicoptError`: send the bytes, read the result.
 
 ## License
