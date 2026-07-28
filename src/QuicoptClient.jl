@@ -20,7 +20,7 @@ const MOI = JuMP.MOI
 import ProtoBuf as PB
 
 export import_model, solve, QuicoptError,
-       set_source, set_scenarios, smean, scvar, sfreq_leq, sfreq_geq
+       set_distribution, set_scenarios, expectation, cvar, prob
 
 include("proto/quicopt/quicopt.jl")   # ProtoBuf.jl-generated Program structs (module quicopt.modeler.v1)
 include("wire.jl")                    # a Program ↔ the bytes the service reads
@@ -31,7 +31,7 @@ include("wire.jl")                    # a Program ↔ the bytes the service read
 Operators the client emits — mirrors the service's published operator catalog. The
 server's decoded `Catalog` is the final arbiter; an MOI head outside this set is a
 coverage gap to register service-side, never papered over here. The last four are
-the scenario aggregators of the stochastic layer (see [`set_source`](@ref)).
+the scenario aggregators of the stochastic layer (see [`set_distribution`](@ref)).
 """
 const _CATALOG = Set((:+, :-, :*, :/, :^, :sin, :cos, :exp, :log, :sqrt, :abs,
                       :max, :min, :smean, :scvar, :sfreq_leq, :sfreq_geq))
@@ -138,17 +138,22 @@ _bound!(lo, hi, dom, vi, ::MOI.Integer)      = (dom[vi] = _pb.Domain.INTEGER)
 
 # ── function-in-set constraint → Constraint (Zero / Nonneg) ─────────────────
 
-# ── the stochastic layer: sources on JuMP variables, aggregators as heads ────
+# ── the stochastic layer: distributions on JuMP variables, aggregators as heads ─
 #
 # A stochastic model is authored in JuMP like any other — the stochastic
-# constructs are just more functions. A *source* (a random variable) is an
-# ordinary JuMP variable marked with `set_source`; the importer emits it as a
-# named source declaration and rewrites its occurrences into source references,
-# so it never becomes a decision variable. The *aggregators* (`smean`, `scvar`,
-# `sfreq_leq`, `sfreq_geq`) build nonlinear expression nodes with stochastic
-# operator heads; JuMP stores them symbolically and this package ships them as
-# data, so no local evaluator is ever involved — such models solve through the
-# service, not through a locally attached optimizer.
+# constructs are just more functions. A random variable is an ordinary JuMP
+# variable given a distribution with `set_distribution`; the importer emits it as
+# a named *source* declaration — the wire's word for it, kept in the internals
+# below — and rewrites its occurrences into source references, so it never
+# becomes a decision variable. The *aggregators* (`expectation`, `cvar`, `prob`)
+# build nonlinear expression nodes with stochastic operator heads; JuMP stores
+# them symbolically and this package ships them as data, so no local evaluator is
+# ever involved — such models solve through the service, not through a locally
+# attached optimizer.
+#
+# The naming split is deliberate: the public surface speaks probability, the
+# internals and the wire speak the catalog's operator names (`:smean`, `:scvar`,
+# `:sfreq_leq`, `:sfreq_geq`), which is what actually travels.
 
 # model.ext slot: per-model stochastic declarations, written by the setters
 # below and read by `import_model`.
@@ -164,7 +169,7 @@ _stoch(m::JuMP.Model)  = get(m.ext, :quicopt_stochastic, nothing)
 function _source_name(v::JuMP.VariableRef, name)
     nm = name === nothing ? Symbol(JuMP.name(v)) : Symbol(name)
     (name === nothing && isempty(JuMP.name(v))) &&
-        error("source variable is anonymous — pass a name: set_source(m, v, …; name = :demand)")
+        error("random variable is anonymous — pass a name: set_distribution(m, v, …; name = :demand)")
     nm
 end
 
@@ -174,40 +179,39 @@ function _register_source!(m::JuMP.Model, v::JuMP.VariableRef, nm::Symbol, spec)
     for (ovi, decl) in st.sources
         ovi == vi && continue
         decl.first == nm &&
-            error("source name :$nm is already taken by another variable — " *
-                  "each source is one random variable; declare independent " *
-                  "sources as separate variables with distinct names")
+            error("the name :$nm is already taken by another random variable — " *
+                  "a name is one random variable; declare independent ones as " *
+                  "separate variables with distinct names")
     end
     st.sources[vi] = nm => spec
     v
 end
 
 """
-    set_source(model, v, head::Symbol, params...; name = Symbol(JuMP.name(v)))
+    set_distribution(model, v, head::Symbol, params...; name = Symbol(JuMP.name(v)))
 
-Declare the JuMP variable `v` as a *parametric stochastic source*: a draw from
-the distribution `head` (an operator from the service catalog, e.g. `:normal`)
-with the given parameters. Parameters may be numbers or deterministic JuMP
-expressions. The variable stops being a decision variable — it becomes a named
-random variable, and every use of `v` in the objective or constraints refers to
-the *same* draw (per scenario). Declare independent sources as separate
-variables.
+Give the JuMP variable `v` a distribution: a draw from `head` (an operator from
+the service catalog, e.g. `:normal`) with the given parameters, which may be
+numbers or deterministic JuMP expressions. A variable that has a distribution is
+no longer one the solver chooses — it becomes a named random variable, and every
+use of `v` in the objective or constraints refers to the *same* draw (per
+scenario). Declare independent random variables separately.
 
-Do not put bounds or integrality on `v` — a source carries a distribution, not
-a domain — and close every stochastic subexpression with an aggregator
-([`smean`](@ref), [`scvar`](@ref), [`sfreq_leq`](@ref), [`sfreq_geq`](@ref))
-before it reaches the objective or a constraint root.
+Do not put bounds or integrality on `v` — it carries a distribution, not a
+domain — and close every stochastic subexpression with an aggregator
+([`expectation`](@ref), [`cvar`](@ref), [`prob`](@ref)) before it reaches the
+objective or a constraint root.
 
-    set_source(model, v, data::AbstractVector{<:Real}; name = …)
+    set_distribution(model, v, data::AbstractVector{<:Real}; name = …)
 
-The empirical form: `v` takes the given scenario column, one value per
+The empirical distribution: `v` takes the given scenario column, one value per
 scenario (`length(data)` must equal the count passed to
 [`set_scenarios`](@ref)). Several empirical columns are aligned by scenario
 index, so jointly-drawn columns preserve their correlation.
 """
-set_source(m::JuMP.Model, v::JuMP.VariableRef, head::Symbol, params...; name = nothing) =
+set_distribution(m::JuMP.Model, v::JuMP.VariableRef, head::Symbol, params...; name = nothing) =
     _register_source!(m, v, _source_name(v, name), (head, collect(params)))
-set_source(m::JuMP.Model, v::JuMP.VariableRef, data::AbstractVector{<:Real}; name = nothing) =
+set_distribution(m::JuMP.Model, v::JuMP.VariableRef, data::AbstractVector{<:Real}; name = nothing) =
     _register_source!(m, v, _source_name(v, name), Float64.(data))
 
 """
@@ -230,35 +234,45 @@ function set_scenarios(m::JuMP.Model, n::Integer; seed::Union{Integer,Nothing} =
 end
 
 """
-    smean(x) -> NonlinearExpr
+    expectation(x) -> NonlinearExpr
 
-The scenario mean `E[x]` — the basic stochastic → deterministic aggregator.
-Symbolic: JuMP stores the node and the service evaluates it; attaching a local
-optimizer to a model containing one will fail with an unsupported-operator
-error, which is expected.
+The expected value `E[x]` over the scenarios — the basic stochastic →
+deterministic aggregator. Symbolic: JuMP stores the node and the service
+evaluates it; attaching a local optimizer to a model containing one will fail
+with an unsupported-operator error, which is expected.
 """
-smean(x) = JuMP.NonlinearExpr(:smean, x)
+expectation(x) = JuMP.NonlinearExpr(:smean, x)
 
 """
-    scvar(x, α) -> NonlinearExpr
+    cvar(x, α) -> NonlinearExpr
 
 The conditional value-at-risk of `x` at level `α ∈ (0, 1)` — the expected value
 of `x` over its worst `(1 − α)` tail. `α` must be a plain number.
 """
-scvar(x, α::Real) = JuMP.NonlinearExpr(:scvar, x, Float64(α))
+cvar(x, α::Real) = JuMP.NonlinearExpr(:scvar, x, Float64(α))
 
 """
-    sfreq_leq(x, τ) -> NonlinearExpr
-    sfreq_geq(x, τ) -> NonlinearExpr
+    prob(x, ≤, τ) -> NonlinearExpr
+    prob(x, ≥, τ) -> NonlinearExpr
 
-The scenario frequency of `x ≤ τ` (resp. `x ≥ τ`) — the fraction of scenarios
-satisfying the comparison, for chance constraints such as
-`@constraint(m, sfreq_leq(demand - stock, 0.0) >= 0.9)`. `τ` must be a plain
-number.
+The probability that `x ≤ τ` (resp. `x ≥ τ`): the fraction of scenarios in which
+the comparison holds. This is the aggregator behind a chance constraint —
+
+    @constraint(m, prob(demand - stock, ≤, 0) >= 0.9)
+
+reads as *the probability that demand exceeds stock in no scenario is at least
+0.9*. The relation is an argument rather than part of the name so that it can
+only bind to `x`: written as `prob_atmost(x, τ)` it would compete with the bound
+on the probability itself, which the constraint already carries.
+
+Only `≤` and `≥` have scenario counterparts (`<=` and `>=` are the same functions
+in Julia, so either spelling works); `τ` must be a plain number.
 """
-sfreq_leq(x, τ::Real) = JuMP.NonlinearExpr(:sfreq_leq, x, Float64(τ))
-sfreq_geq(x, τ::Real) = JuMP.NonlinearExpr(:sfreq_geq, x, Float64(τ))
-@doc (@doc sfreq_leq) sfreq_geq
+prob(x, ::typeof(<=), τ::Real) = JuMP.NonlinearExpr(:sfreq_leq, x, Float64(τ))
+prob(x, ::typeof(>=), τ::Real) = JuMP.NonlinearExpr(:sfreq_geq, x, Float64(τ))
+prob(x, rel, τ) =
+    error("prob compares against a numeric threshold with ≤ or ≥ (equivalently " *
+          "<= or >=) — got $(repr(rel)) and $(repr(τ))")
 
 # a distribution parameter: a number, or a deterministic JuMP scalar expression
 _param_expr(p::Real, var) = _const(p)
@@ -307,9 +321,9 @@ domain; the objective and every constraint become Quicopt expressions
 `Program` (no index sets); ±Inf bounds pass through and mean unbounded in that
 direction.
 
-Variables marked with [`set_source`](@ref) are emitted as named source
-declarations instead of decision variables, their uses rewritten to source
-references; the scenario count and seed from [`set_scenarios`](@ref) ride along
+Variables given a distribution with [`set_distribution`](@ref) are emitted as
+named source declarations instead of decision variables, their uses rewritten to
+source references; the scenario count and seed from [`set_scenarios`](@ref) ride along
 as model data. A model with no stochastic marks emits exactly what it always
 did.
 """

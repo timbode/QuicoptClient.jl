@@ -60,18 +60,23 @@ const GOLDENS = joinpath(@__DIR__, "goldens")
 
         # authoring guardrails
         mb = Model(); @variable(mb, 0 <= w <= 1)
-        set_source(mb, w, :normal, 0.0, 1.0)
-        @test_throws ErrorException QuicoptClient.import_model(mb)      # bounds on a source
+        set_distribution(mb, w, :normal, 0.0, 1.0)
+        @test_throws ErrorException QuicoptClient.import_model(mb)      # bounds on a random variable
 
         ma = Model(); v = @variable(ma)
-        @test_throws ErrorException set_source(ma, v, :normal, 0.0, 1.0)  # anonymous, no name
+        @test_throws ErrorException set_distribution(ma, v, :normal, 0.0, 1.0)  # anonymous, no name
 
         mc = Model(); @variable(mc, a); @variable(mc, b)
-        set_source(mc, a, :normal, 0.0, 1.0)
-        @test_throws ErrorException set_source(mc, b, :normal, 0.0, 1.0; name = :a)  # name collision
+        set_distribution(mc, a, :normal, 0.0, 1.0)
+        @test_throws ErrorException set_distribution(mc, b, :normal, 0.0, 1.0; name = :a)  # name collision
 
         @test_throws ErrorException set_scenarios(mc, 0)                # R ≥ 1
         @test_throws ErrorException set_scenarios(mc, 4; seed = 0)      # 0 reserved
+
+        # the relation binds to x, and only ≤ / ≥ have scenario counterparts
+        @test prob(a, ≤, 0).head === prob(a, <=, 0).head === :sfreq_leq
+        @test prob(a, ≥, 0).head === :sfreq_geq
+        @test_throws ErrorException prob(a, <, 0)
     end
 
     include("transport.jl")

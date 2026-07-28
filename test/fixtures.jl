@@ -6,7 +6,7 @@
 module Fixtures
 
 using JuMP
-using QuicoptClient   # set_source / set_scenarios / aggregators, for the stochastic fixtures
+using QuicoptClient   # set_distribution / set_scenarios / aggregators, for the stochastic fixtures
 include(joinpath(@__DIR__, "power", "PowerVertical.jl"))
 using .PowerVertical
 
@@ -67,29 +67,29 @@ end
 
 Stochastic fixtures — kept OUT of [`models`](@ref), whose consumers drive every
 entry through a deterministic solve; these author the stochastic layer
-(`set_source`, `set_scenarios`, aggregator heads) and exist to lock the wire
-bytes and the importer's source rewriting.
+(`set_distribution`, `set_scenarios`, aggregator heads) and exist to lock the
+wire bytes and the importer's source rewriting.
 """
 function stochastic_models()
     out = Pair{String,Model}[]
 
-    # the newsvendor: parametric source, smean, max — the canonical two-stage toy
+    # the newsvendor: parametric draw, expectation, max — the canonical two-stage toy
     m = Model()
     @variable(m, 0 <= x <= 200)
     @variable(m, demand)
-    set_source(m, demand, :normal, 100.0, 15.0)
+    set_distribution(m, demand, :normal, 100.0, 15.0)
     set_scenarios(m, 512; seed = 42)
-    @objective(m, Min, 3x + 10 * smean(max(demand - x, 0)))
+    @objective(m, Min, 3x + 10 * expectation(max(demand - x, 0)))
     push!(out, "newsvendor_stoch" => m)
 
     # empirical column + CVaR objective + a chance constraint (sfreq head)
     m = Model()
     @variable(m, 0 <= x <= 100)
     @variable(m, shock)
-    set_source(m, shock, [0.9, 1.0, 1.1, 1.3])
+    set_distribution(m, shock, [0.9, 1.0, 1.1, 1.3])
     set_scenarios(m, 4)
-    @objective(m, Min, x + scvar(shock * (50 - x), 0.95))
-    @constraint(m, sfreq_leq(shock * 40 - x, 0.0) >= 0.75)
+    @objective(m, Min, x + cvar(shock * (50 - x), 0.95))
+    @constraint(m, prob(shock * 40 - x, ≤, 0.0) >= 0.75)
     push!(out, "empirical_chance" => m)
 
     out
