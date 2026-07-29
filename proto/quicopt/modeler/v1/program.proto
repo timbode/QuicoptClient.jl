@@ -54,13 +54,25 @@ message Index {
 
 message Expression {
   oneof node {
-    double   constant = 1;  // Const(value) — always emitted (a set oneof case),
-                            //                so Const(0.0) survives the round-trip
-    ParamRef param    = 2;  // Param(name, index)
-    VarRef   var      = 3;  // Var(name, index)
-    Apply    apply    = 4;  // Apply(op, args)
-    Reduce   reduce   = 5;  // Reduce(op, idx, over, body, cond)
+    double    constant = 1;  // Const(value) — always emitted (a set oneof case),
+                             //                so Const(0.0) survives the round-trip
+    ParamRef  param    = 2;  // Param(name, index)
+    VarRef    var      = 3;  // Var(name, index)
+    Apply     apply    = 4;  // Apply(op, args)
+    Reduce    reduce   = 5;  // Reduce(op, idx, over, body, cond)
+    SourceRef source   = 6;  // SourceRef(name) — a stochastic source, by name
   }
+}
+
+// A reference to a declared stochastic source (Program.sources). Identity lives
+// in the NAME: every SourceRef("w") denotes the same random variable, however
+// often the subtree containing it is copied — so tree encodings and rewrites
+// preserve the model's correlation structure with no encoder discipline
+// required. Independent sources are separate declarations. A server that
+// predates this field rejects any Expression carrying it (an empty oneof), so
+// a stochastic model can never be silently mis-solved as deterministic.
+message SourceRef {
+  string name = 1;
 }
 
 message ParamRef {
@@ -197,6 +209,44 @@ message FixEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Stochastic sources — named declarations, referenced by SourceRef
+//
+// The stochastic layer rides the SAME expression language: distribution heads
+// and scenario aggregators (smean, scvar, sfreq_*) are catalog operators, so
+// the distribution vocabulary can grow without changing this schema. What the
+// schema adds is declarations: a source is declared once under a name and
+// referenced by SourceRef leaves. The scenario count and seed are model data —
+// they pin the sampled instance, so two solves of the same bytes see the same
+// draws.
+// ---------------------------------------------------------------------------
+
+// A parametric source: a distribution head from the catalog (tag stoch_source)
+// with deterministic parameter expressions, e.g. normal(mu, sigma) where mu
+// may be a Param lookup. Parameters must not contain SourceRef or stochastic
+// heads.
+message Parametric {
+  string              head   = 1;
+  repeated Expression params = 2;
+}
+
+// An empirical source: a fixed scenario column of exactly Program.scenarios
+// values. Joint distributions are several columns drawn jointly client-side —
+// the scenario index is shared across all sources, so alignment preserves
+// correlation.
+message Empirical {
+  repeated double data = 1;  // packed; length == Program.scenarios
+}
+
+// One named source declaration.
+message SourceDecl {
+  string name = 1;
+  oneof kind {
+    Parametric parametric = 2;
+    Empirical  empirical  = 3;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Program — the structured authoring container (what crosses the wire)
 // ---------------------------------------------------------------------------
 
@@ -209,6 +259,17 @@ message Program {
   string              sense        = 6;  // "min" | "max"
   repeated Constraint constraints  = 7;
   repeated FixEntry   fix          = 8;
+
+  // Stochastic layer (absent ⇒ deterministic; a deterministic Program encodes
+  // identically with or without this schema). For the two scalars, proto3
+  // conflates 0 with absent, so 0 is not a legal value on the wire: both mean
+  // "server default" (scenarios 1, seed 1). A model whose MEANING depends on
+  // these fields necessarily contains a SourceRef or a stochastic operator, so
+  // an old server rejects it cleanly rather than mis-solving it; `scenarios`
+  // without stochastic terms is semantically inert and safe to skip.
+  uint64              scenarios     = 9;   // number of scenarios in the sampled instance
+  uint64              scenario_seed = 10;  // base-draw seed
+  repeated SourceDecl sources       = 11;  // canonical order: sorted by name
 }
 
 // ---------------------------------------------------------------------------

@@ -11,20 +11,20 @@ makedocs(
     checkdocs = :exports,
     format = Documenter.HTML(
         prettyurls = get(ENV, "CI", "false") == "true",
-        canonical  = "https://timbode.github.io/QuicoptClient.jl",
+        canonical  = "https://quicopt.github.io/QuicoptClient.jl",
         assets     = ["assets/custom.css"],
         sidebar_sitename = false,   # the logo already carries the brand
     ),
     pages = [
         "Home" => "index.md",
         "API reference" => [
-            "Modeling"  => "api/modeling.md",
-            "Transport" => "api/transport.md",
+            "Modeling" => "api/modeling.md",
+            "Solving"  => "api/transport.md",
         ],
     ],
 )
 
 deploydocs(
-    repo      = "github.com/timbode/QuicoptClient.jl",
+    repo      = "github.com/Quicopt/QuicoptClient.jl",
     devbranch = "main",
 )
